@@ -1,50 +1,43 @@
-# ThreatNoir IOC MCP Server
+# @threatnoir/mcp-iocs
 
-Standalone **MCP (Model Context Protocol) server** that lets Claude/Claude Code search and retrieve ThreatNoir IOCs (Indicators of Compromise) directly from the **Supabase REST API** using a service role key.
+MCP server for querying ThreatNoir IOCs (Indicators of Compromise) from Claude Code, VS Code, or any MCP client.
 
-## Tools
+## Quick Start
 
-- `search_iocs` — free-text search in IOC `value` (ilike)
-- `list_iocs` — list recent IOCs (optionally by type)
-- `lookup_ioc` — exact match lookup (eq)
-
-Supported IOC types:
-
-`ip`, `domain`, `hash_md5`, `hash_sha1`, `hash_sha256`, `url`, `cve`, `mitre_attack`, `email`, `malware`
-
-## Configuration
-
-Environment variables:
-
-- `SUPABASE_URL` (optional) — defaults to `https://zbqafrnxsxwbarztrtqp.supabase.co`
-- `SUPABASE_SERVICE_KEY` (required) — Supabase **service role** key
-
-## Development
-
-```bash
-npm install
-npm run build
-npm start
-```
-
-## MCP settings.json snippet (do not commit secrets)
-
-Add this to your `~/.claude/settings.json` under `mcpServers`:
+1. Get an API key at https://threatnoir.com/settings
+2. Add to your `.mcp.json` (or your MCP client's config):
 
 ```json
 {
-  "threatnoir-iocs": {
-    "command": "node",
-    "args": ["/home/cruxis/projects/threatnoir-mcp/dist/index.js"],
-    "env": {
-      "SUPABASE_SERVICE_KEY": "op://Claude/Supabase/service_role_key"
+  "mcpServers": {
+    "threatnoir-iocs": {
+      "command": "npx",
+      "args": ["-y", "@threatnoir/mcp-iocs"],
+      "env": {
+        "THREATNOIR_API_KEY": "tn_live_...",
+        "THREATNOIR_URL": "https://threatnoir.com"
+      }
     }
   }
 }
 ```
 
-## Quick protocol smoke test
+Notes:
 
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | SUPABASE_SERVICE_KEY=test node dist/index.js
-```
+- `THREATNOIR_URL` is optional (defaults to `https://threatnoir.com`).
+- `list_iocs` works without an API key.
+- `search_iocs` and `lookup_ioc` require `THREATNOIR_API_KEY`.
+
+## Available Tools
+
+- `search_iocs` — Search ThreatNoir's IOC database by keyword (requires API key)
+- `list_iocs` — List the most recent IOCs (optionally filtered by type)
+- `lookup_ioc` — Exact match lookup for a specific IOC value (requires API key)
+
+## IOC Types
+
+`ip`, `domain`, `hash_md5`, `hash_sha1`, `hash_sha256`, `url`, `cve`, `mitre_attack`, `email`, `malware`
+
+## Internal mode (ThreatNoir team)
+
+If `SUPABASE_SERVICE_KEY` is set, the server will use the internal Supabase REST API mode (useful for local dev).

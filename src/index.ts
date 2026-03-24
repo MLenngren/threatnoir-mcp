@@ -1,9 +1,15 @@
+#!/usr/bin/env node
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { request as httpsRequest } from "node:https";
 import { z } from "zod";
 
 const DEFAULT_SUPABASE_URL = "https://zbqafrnxsxwbarztrtqp.supabase.co";
 const ARTICLE_IOCS_PATH = "/rest/v1/article_iocs";
+
+const DEFAULT_THREATNOIR_URL = "https://threatnoir.com";
+const THREATNOIR_IOCS_PATH = "/api/v1/iocs";
 
 const IocTypeEnum = z.enum([
   "ip",
@@ -35,6 +41,27 @@ type ArticleIocRow = {
   article?: Article | null;
 };
 
+type ThreatNoirIocItem = {
+  type: string;
+  value: string;
+  context?: string | null;
+  article?: Article | null;
+};
+
+type ThreatNoirIocResponse = {
+  items: ThreatNoirIocItem[];
+  hasMore?: boolean;
+  nextOffset?: number;
+};
+
+type NormalizedIoc = {
+  type: string;
+  value: string;
+  context: string | null;
+  article: Article | null;
+  threatnoirArticleUrl: string | null;
+};
+
 function getSupabaseUrl(): string {
   return process.env.SUPABASE_URL ?? DEFAULT_SUPABASE_URL;
 }
@@ -43,6 +70,62 @@ function getServiceKeyOrNull(): string | null {
   const key = process.env.SUPABASE_SERVICE_KEY;
   if (!key) return null;
   return key;
+}
+
+function getThreatNoirBaseUrl(): string {
+  return process.env.THREATNOIR_URL ?? DEFAULT_THREATNOIR_URL;
+}
+
+function getThreatNoirApiKeyOrNull(): string | null {
+  const key = process.env.THREATNOIR_API_KEY;
+  if (!key) return null;
+  return key;
+}
+
+async function httpsGetText(url: URL, headers: Record<string, string>): Promise<{ status: number; bodyText: string }> {
+  return await new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      url,
+      {
+        method: "GET",
+        headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const status = res.statusCode ?? 0;
+          const bodyText = Buffer.concat(chunks).toString("utf8");
+          resolve({ status, bodyText });
+        });
+      },
+    );
+
+    req.on("error", (err) => reject(err));
+    req.end();
+  });
+}
+
+async function httpsGetJson<T>(url: URL, headers: Record<string, string>): Promise<T> {
+  const { status, bodyText } = await httpsGetText(url, headers);
+
+  if (status < 200 || status >= 300) {
+    let detail = bodyText;
+    try {
+      const parsed = JSON.parse(bodyText) as { message?: string; error?: string; details?: string; hint?: string };
+      detail = [parsed.message, parsed.error, parsed.details, parsed.hint].filter(Boolean).join(" | ") || bodyText;
+    } catch {
+      // keep bodyText
+    }
+    throw new Error(`HTTP error (${status}): ${detail}`);
+  }
+
+  try {
+    return JSON.parse(bodyText) as T;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to parse JSON response: ${msg}`);
+  }
 }
 
 const SELECT_CLAUSE =
@@ -69,38 +152,39 @@ async function fetchArticleIocs(params: {
     url.searchParams.set("value", valueFilter);
   }
 
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      apikey: serviceKey,
-      Authorization: `Bearer ${serviceKey}`,
-      Accept: "application/json",
-    },
+  const json = await httpsGetJson<unknown>(url, {
+    apikey: serviceKey,
+    Authorization: `Bearer ${serviceKey}`,
+    Accept: "application/json",
   });
 
-  const bodyText = await res.text();
-  if (!res.ok) {
-    let detail = bodyText;
-    try {
-      const parsed = JSON.parse(bodyText) as { message?: string; details?: string; hint?: string };
-      detail = [parsed.message, parsed.details, parsed.hint].filter(Boolean).join(" | ") || bodyText;
-    } catch {
-      // keep bodyText
-    }
-
-    throw new Error(`Supabase REST API error (${res.status}): ${detail}`);
+  if (!Array.isArray(json)) {
+    throw new Error("Unexpected Supabase response shape (expected JSON array)");
   }
+  return json as ArticleIocRow[];
+}
 
-  try {
-    const json = JSON.parse(bodyText) as unknown;
-    if (!Array.isArray(json)) {
-      throw new Error("Unexpected response shape (expected JSON array)");
-    }
-    return json as ArticleIocRow[];
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Failed to parse Supabase response: ${msg}`);
+async function fetchThreatNoirIocs(params: {
+  apiKey: string | null;
+  q?: string;
+  type?: IocType;
+  limit: number;
+}): Promise<ThreatNoirIocItem[]> {
+  const { apiKey, q, type, limit } = params;
+
+  const url = new URL(THREATNOIR_IOCS_PATH, getThreatNoirBaseUrl());
+  url.searchParams.set("limit", String(limit));
+  if (q) url.searchParams.set("q", q);
+  if (type) url.searchParams.set("type", type);
+
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+  const json = await httpsGetJson<ThreatNoirIocResponse>(url, headers);
+  if (!json || !Array.isArray(json.items)) {
+    throw new Error("Unexpected ThreatNoir API response shape (expected { items: [] })");
   }
+  return json.items;
 }
 
 function formatDate(dateStr: string | null | undefined): string {
@@ -110,9 +194,42 @@ function formatDate(dateStr: string | null | undefined): string {
   return d.toISOString().slice(0, 10);
 }
 
+function getThreatNoirArticleUrl(articleId: string | number | null | undefined): string | null {
+  if (!articleId) return null;
+  try {
+    const url = new URL("/iocs", getThreatNoirBaseUrl());
+    url.searchParams.set("article", String(articleId));
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeFromSupabase(row: ArticleIocRow): NormalizedIoc {
+  const article = row.article ?? null;
+  return {
+    type: row.type,
+    value: row.value,
+    context: row.context ?? null,
+    article,
+    threatnoirArticleUrl: getThreatNoirArticleUrl(article?.id),
+  };
+}
+
+function normalizeFromThreatNoir(item: ThreatNoirIocItem): NormalizedIoc {
+  const article = item.article ?? null;
+  return {
+    type: item.type,
+    value: item.value,
+    context: item.context ?? null,
+    article,
+    threatnoirArticleUrl: getThreatNoirArticleUrl(article?.id),
+  };
+}
+
 function formatResults(opts: {
   header: string;
-  rows: ArticleIocRow[];
+  rows: NormalizedIoc[];
   emptyMessage: string;
 }): string {
   const { header, rows, emptyMessage } = opts;
@@ -131,10 +248,14 @@ function formatResults(opts: {
     }
 
     const articleTitle = row.article?.title ?? "(untitled)";
-    const published = formatDate(row.article?.published_at);
-    lines.push(`   Article: "${articleTitle}" (${published})`);
+    lines.push(`   Article: "${articleTitle}"`);
+    lines.push(`   Published: ${formatDate(row.article?.published_at)}`);
+
     if (row.article?.url) {
       lines.push(`   Source: ${row.article.url}`);
+    }
+    if (row.threatnoirArticleUrl) {
+      lines.push(`   ThreatNoir: ${row.threatnoirArticleUrl}`);
     }
     lines.push("");
   });
@@ -143,14 +264,15 @@ function formatResults(opts: {
 }
 
 const server = new McpServer({
-  name: "threatnoir-ioc-mcp",
+  name: "threatnoir-mcp-iocs",
   version: "1.0.0",
 });
 
 server.registerTool(
   "search_iocs",
   {
-    description: "Free-text search ThreatNoir IOCs by value (IP, domain, hash, CVE, etc.)",
+    description:
+      "Search ThreatNoir's IOC database by keyword. Finds IPs, domains, hashes, CVEs, and more. Requires API key.",
     inputSchema: {
       query: z.string().min(1).describe("Search term (IP, domain, hash, CVE, etc.)"),
       type: IocTypeEnum.optional().describe("Optional IOC type filter"),
@@ -159,12 +281,14 @@ server.registerTool(
   },
   async ({ query, type, limit }) => {
     const serviceKey = getServiceKeyOrNull();
-    if (!serviceKey) {
+    const apiKey = getThreatNoirApiKeyOrNull();
+
+    if (!serviceKey && !apiKey) {
       return {
         content: [
           {
             type: "text",
-            text: "Error: SUPABASE_SERVICE_KEY is not set. Configure it via your MCP settings (recommended: 1Password op:// reference).",
+            text: "Set THREATNOIR_API_KEY to search IOCs",
           },
         ],
         isError: true,
@@ -172,16 +296,25 @@ server.registerTool(
     }
 
     try {
-      const rows = await fetchArticleIocs({
-        serviceKey,
-        valueFilter: `ilike.*${query}*`,
-        type,
-        limit: Math.min(limit ?? 20, 50),
-      });
+      const maxLimit = Math.min(limit ?? 20, 50);
+
+      const normalized: NormalizedIoc[] = serviceKey
+        ? (await fetchArticleIocs({
+            serviceKey,
+            valueFilter: `ilike.*${query}*`,
+            type,
+            limit: maxLimit,
+          })).map(normalizeFromSupabase)
+        : (await fetchThreatNoirIocs({
+            apiKey,
+            q: query,
+            type,
+            limit: maxLimit,
+          })).map(normalizeFromThreatNoir);
 
       const text = formatResults({
-        header: `Found ${rows.length} IOCs matching "${query}":`,
-        rows,
+        header: `Found ${normalized.length} IOCs matching "${query}":`,
+        rows: normalized,
         emptyMessage: `No IOCs found matching your query.`,
       });
 
@@ -199,7 +332,8 @@ server.registerTool(
 server.registerTool(
   "list_iocs",
   {
-    description: "List recent ThreatNoir IOCs (optionally filtered by type)",
+    description:
+      "List the most recent IOCs from ThreatNoir, optionally filtered by type (ip, domain, cve, hash_md5, hash_sha256, malware, etc.)",
     inputSchema: {
       type: IocTypeEnum.optional().describe("Optional IOC type filter"),
       limit: z.number().int().min(1).max(50).optional().describe("Max results (default 20, max 50)"),
@@ -207,29 +341,26 @@ server.registerTool(
   },
   async ({ type, limit }) => {
     const serviceKey = getServiceKeyOrNull();
-    if (!serviceKey) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Error: SUPABASE_SERVICE_KEY is not set. Configure it via your MCP settings (recommended: 1Password op:// reference).",
-          },
-        ],
-        isError: true,
-      };
-    }
+    const apiKey = getThreatNoirApiKeyOrNull();
 
     try {
-      const rows = await fetchArticleIocs({
-        serviceKey,
-        type,
-        limit: Math.min(limit ?? 20, 50),
-      });
+      const maxLimit = Math.min(limit ?? 20, 50);
+      const normalized: NormalizedIoc[] = serviceKey
+        ? (await fetchArticleIocs({
+            serviceKey,
+            type,
+            limit: maxLimit,
+          })).map(normalizeFromSupabase)
+        : (await fetchThreatNoirIocs({
+            apiKey,
+            type,
+            limit: maxLimit,
+          })).map(normalizeFromThreatNoir);
 
       const suffix = type ? ` (type=${type})` : "";
       const text = formatResults({
         header: `Recent IOCs${suffix}:`,
-        rows,
+        rows: normalized,
         emptyMessage: "No IOCs found.",
       });
       return { content: [{ type: "text", text }] };
@@ -246,19 +377,21 @@ server.registerTool(
 server.registerTool(
   "lookup_ioc",
   {
-    description: "Exact-match lookup for a ThreatNoir IOC value",
+    description: "Look up a specific IOC value (exact match) and get all associated articles and context.",
     inputSchema: {
       value: z.string().min(1).describe("Exact IOC value (IP, domain, hash, CVE, etc.)"),
     },
   },
   async ({ value }) => {
     const serviceKey = getServiceKeyOrNull();
-    if (!serviceKey) {
+    const apiKey = getThreatNoirApiKeyOrNull();
+
+    if (!serviceKey && !apiKey) {
       return {
         content: [
           {
             type: "text",
-            text: "Error: SUPABASE_SERVICE_KEY is not set. Configure it via your MCP settings (recommended: 1Password op:// reference).",
+            text: "Set THREATNOIR_API_KEY to search IOCs",
           },
         ],
         isError: true,
@@ -266,15 +399,25 @@ server.registerTool(
     }
 
     try {
-      const rows = await fetchArticleIocs({
-        serviceKey,
-        valueFilter: `eq.${value}`,
-        limit: 50,
-      });
+      const needle = value.trim();
+
+      const normalized: NormalizedIoc[] = serviceKey
+        ? (await fetchArticleIocs({
+            serviceKey,
+            valueFilter: `eq.${needle}`,
+            limit: 50,
+          })).map(normalizeFromSupabase)
+        : (await fetchThreatNoirIocs({
+            apiKey,
+            q: needle,
+            limit: 50,
+          }))
+            .filter((item) => item.value === needle || item.value.toLowerCase() === needle.toLowerCase())
+            .map(normalizeFromThreatNoir);
 
       const text = formatResults({
-        header: `Found ${rows.length} IOCs matching "${value}":`,
-        rows,
+        header: `Found ${normalized.length} IOCs matching "${needle}":`,
+        rows: normalized,
         emptyMessage: "No IOCs found matching your query.",
       });
 

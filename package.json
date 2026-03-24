@@ -1,16 +1,30 @@
 {
-  "name": "threatnoir-mcp",
+  "name": "@threatnoir/mcp-iocs",
   "version": "1.0.0",
+  "description": "MCP server for querying ThreatNoir IOCs from Claude Code and other MCP clients",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "threatnoir-mcp-iocs": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "Standalone MCP server for searching ThreatNoir IOCs via Supabase REST.",
+  "keywords": [
+    "mcp",
+    "threatnoir",
+    "ioc",
+    "security",
+    "threat-intelligence"
+  ],
+  "repository": "https://github.com/MLenngren/threatnoir-mcp",
+  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "zod": "^4.3.6"
