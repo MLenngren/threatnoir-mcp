@@ -5,7 +5,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { request as httpsRequest } from "node:https";
 import { z } from "zod";
 
-const DEFAULT_SUPABASE_URL = "https://zbqafrnxsxwbarztrtqp.supabase.co";
 const ARTICLE_IOCS_PATH = "/rest/v1/article_iocs";
 
 const DEFAULT_THREATNOIR_URL = "https://threatnoir.com";
@@ -62,8 +61,8 @@ type NormalizedIoc = {
   threatnoirArticleUrl: string | null;
 };
 
-function getSupabaseUrl(): string {
-  return process.env.SUPABASE_URL ?? DEFAULT_SUPABASE_URL;
+function getSupabaseUrl(): string | null {
+  return process.env.SUPABASE_URL ?? null;
 }
 
 function getServiceKeyOrNull(): string | null {
@@ -139,7 +138,9 @@ async function fetchArticleIocs(params: {
 }): Promise<ArticleIocRow[]> {
   const { serviceKey, valueFilter, type, limit } = params;
 
-  const url = new URL(`${getSupabaseUrl()}${ARTICLE_IOCS_PATH}`);
+  const supabaseUrl = getSupabaseUrl();
+  if (!supabaseUrl) throw new Error("SUPABASE_URL is required for direct mode");
+  const url = new URL(`${supabaseUrl}${ARTICLE_IOCS_PATH}`);
   url.searchParams.set("select", SELECT_CLAUSE);
   url.searchParams.set("articles.status", "eq.approved");
   url.searchParams.set("order", "created_at.desc");

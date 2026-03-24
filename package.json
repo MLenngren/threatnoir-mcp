@@ -1,6 +1,6 @@
 {
   "name": "threatnoir-mcp-iocs",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server for querying ThreatNoir IOCs from Claude Code and other MCP clients",
   "type": "module",
   "main": "dist/index.js",
