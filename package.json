@@ -1,5 +1,5 @@
 {
-  "name": "@threatnoir/mcp-iocs",
+  "name": "threatnoir-mcp-iocs",
   "version": "1.0.0",
   "description": "MCP server for querying ThreatNoir IOCs from Claude Code and other MCP clients",
   "type": "module",
