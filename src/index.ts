@@ -9,6 +9,9 @@ const ARTICLE_IOCS_PATH = "/rest/v1/article_iocs";
 
 const DEFAULT_THREATNOIR_URL = "https://threatnoir.com";
 const THREATNOIR_IOCS_PATH = "/api/v1/iocs";
+const THREATNOIR_WEEKLY_PATH = "/api/v1/weekly";
+const THREATNOIR_FOCUS_PATH = "/api/v1/focus";
+const THREATNOIR_AWARENESS_PATH = "/api/v1/awareness";
 
 const IocTypeEnum = z.enum([
   "ip",
@@ -51,6 +54,30 @@ type ThreatNoirIocResponse = {
   items: ThreatNoirIocItem[];
   hasMore?: boolean;
   nextOffset?: number;
+};
+
+type ThreatNoirWeeklyItem = {
+  week_label?: string | null;
+  date_from?: string | null;
+  date_to?: string | null;
+  published_at?: string | null;
+  tldr?: string | null;
+  slug?: string | null;
+};
+
+type ThreatNoirFocusItem = {
+  severity?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  cve_ids?: string[] | null;
+  affected_products?: string[] | null;
+  action_required?: string | null;
+};
+
+type ThreatNoirAwarenessItem = {
+  title?: string | null;
+  excerpt?: string | null;
+  slug?: string | null;
 };
 
 type NormalizedIoc = {
@@ -188,6 +215,40 @@ async function fetchThreatNoirIocs(params: {
   return json.items;
 }
 
+async function fetchThreatNoirApiJson<T>(params: {
+  apiPath: string;
+  apiKey: string | null;
+  query?: Record<string, string | undefined>;
+}): Promise<T> {
+  const { apiPath, apiKey, query } = params;
+
+  const url = new URL(apiPath, getThreatNoirBaseUrl());
+  for (const [k, v] of Object.entries(query ?? {})) {
+    if (v) url.searchParams.set(k, v);
+  }
+
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+
+  return await httpsGetJson<T>(url, headers);
+}
+
+function asArrayOrItemsArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+
+  if (value && typeof value === "object") {
+    const items = (value as { items?: unknown }).items;
+    if (Array.isArray(items)) return items;
+  }
+
+  return [];
+}
+
+function formatSimpleList(items: string[], emptyMessage: string): string {
+  if (items.length === 0) return emptyMessage;
+  return items.join("\n");
+}
+
 function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "unknown date";
   const d = new Date(dateStr);
@@ -266,7 +327,7 @@ function formatResults(opts: {
 
 const server = new McpServer({
   name: "threatnoir-mcp-iocs",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
 server.registerTool(
@@ -427,6 +488,179 @@ server.registerTool(
       const msg = err instanceof Error ? err.message : String(err);
       return {
         content: [{ type: "text", text: `Error looking up IOC: ${msg}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "list_weekly_roundups",
+  {
+    description: "List recent ThreatNoir weekly threat roundups",
+    inputSchema: {
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Number of roundups to return (1-50, default 10)"),
+    },
+  },
+  async ({ limit }) => {
+    try {
+      const apiKey = getThreatNoirApiKeyOrNull();
+      const maxLimit = Math.min(limit ?? 10, 50);
+
+      const json = await fetchThreatNoirApiJson<unknown>({
+        apiPath: THREATNOIR_WEEKLY_PATH,
+        apiKey,
+        query: {
+          limit: String(maxLimit),
+        },
+      });
+
+      const items = asArrayOrItemsArray(json) as ThreatNoirWeeklyItem[];
+      const textItems = items.slice(0, maxLimit).map((item) => {
+        const weekLabel = item.week_label ?? "(unknown week)";
+        const from = item.date_from ?? "unknown";
+        const to = item.date_to ?? "unknown";
+        const published = item.published_at ?? "unknown";
+        const tldr = item.tldr ?? "";
+        const slug = item.slug ?? "";
+        const link = slug ? `https://threatnoir.com/weekly/${slug}` : "https://threatnoir.com/weekly";
+
+        return [
+          `Week: ${weekLabel}`,
+          `Period: ${from} to ${to}`,
+          `Published: ${published}`,
+          `TL;DR: ${tldr}`,
+          `Link: ${link}`,
+          `---`,
+        ].join("\n");
+      });
+
+      const text = formatSimpleList(textItems, "No weekly roundups found.");
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error listing weekly roundups: ${msg}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "list_focus_items",
+  {
+    description: "List active ThreatNoir focus items (security advisories requiring action)",
+    inputSchema: {
+      severity: z
+        .enum(["critical", "high", "medium", "low"])
+        .optional()
+        .describe("Filter by severity: critical, high, medium, low"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Number of items to return (1-50, default 10)"),
+    },
+  },
+  async ({ severity, limit }) => {
+    try {
+      const apiKey = getThreatNoirApiKeyOrNull();
+      const maxLimit = Math.min(limit ?? 10, 50);
+
+      const json = await fetchThreatNoirApiJson<unknown>({
+        apiPath: THREATNOIR_FOCUS_PATH,
+        apiKey,
+        query: {
+          severity: severity ? String(severity) : undefined,
+          limit: String(maxLimit),
+        },
+      });
+
+      const items = asArrayOrItemsArray(json) as ThreatNoirFocusItem[];
+      const textItems = items.slice(0, maxLimit).map((item) => {
+        const sev = (item.severity ?? severity ?? "unknown").toUpperCase();
+        const title = item.title ?? "(untitled)";
+        const summary = item.summary ?? "";
+        const cves = (item.cve_ids ?? []).filter(Boolean).join(", ") || "none";
+        const affected = (item.affected_products ?? []).filter(Boolean).join(", ") || "unknown";
+        const action = item.action_required ?? "";
+
+        return [
+          `[${sev}] ${title}`,
+          `Summary: ${summary}`,
+          `CVEs: ${cves}`,
+          `Affected: ${affected}`,
+          `Action: ${action}`,
+          `Link: https://threatnoir.com/focus`,
+          `---`,
+        ].join("\n");
+      });
+
+      const text = formatSimpleList(textItems, "No focus items found.");
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error listing focus items: ${msg}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "search_awareness",
+  {
+    description: "Search ThreatNoir awareness lessons (security learnings from past incidents)",
+    inputSchema: {
+      query: z.string().min(1).describe('Search term (e.g., "phishing", "ransomware")'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Number of results (1-50, default 10)"),
+    },
+  },
+  async ({ query, limit }) => {
+    try {
+      const apiKey = getThreatNoirApiKeyOrNull();
+      const maxLimit = Math.min(limit ?? 10, 50);
+
+      const json = await fetchThreatNoirApiJson<unknown>({
+        apiPath: THREATNOIR_AWARENESS_PATH,
+        apiKey,
+        query: {
+          q: query,
+          limit: String(maxLimit),
+        },
+      });
+
+      const items = asArrayOrItemsArray(json) as ThreatNoirAwarenessItem[];
+      const textItems = items.slice(0, maxLimit).map((item) => {
+        const title = item.title ?? "(untitled)";
+        const excerpt = item.excerpt ?? "";
+        const slug = item.slug ?? "";
+        const link = slug ? `https://threatnoir.com/awareness/${slug}` : "https://threatnoir.com/awareness";
+        return [title, excerpt, `Link: ${link}`, `---`].join("\n");
+      });
+
+      const text = formatSimpleList(textItems, `No awareness results found for "${query}".`);
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error searching awareness lessons: ${msg}` }],
         isError: true,
       };
     }
