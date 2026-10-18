@@ -667,6 +667,100 @@ server.registerTool(
   },
 );
 
+type FrameworkLibraryItem = { family: string; item: string; code: string; title: string; citations: number };
+type FrameworkItemPage = {
+  item: FrameworkLibraryItem & { publisher: string; summary_md: string; official_url: string; note: string | null };
+  lessons: { total: number; list: Array<{ slug: string; title: string }> };
+  controls: Array<{ slug: string; name: string }>;
+  related: Array<{ family: string; item: string; code: string; title: string }>;
+};
+
+function formatFrameworkPage(page: FrameworkItemPage): string {
+  const it = page.item;
+  const lines = [
+    `${it.code}: ${it.title} (${it.publisher})`,
+    "",
+    it.summary_md.replace(/\*\*/g, ""),
+    "",
+    it.note ? `Note: ${it.note}` : "",
+    `Official source: ${it.official_url}`,
+    `ThreatNoir page: https://threatnoir.com/frameworks/${it.family}/${it.item}`,
+    page.controls.length ? `Controls that help: ${page.controls.map((c) => `${c.name} (https://threatnoir.com/controls/${c.slug})`).join("; ")}` : "",
+    page.lessons.total ? `Cited in ${page.lessons.total} ThreatNoir lessons, latest: ${page.lessons.list.slice(0, 5).map((l) => l.title).join(" | ")}` : "",
+    page.related.length ? `Often cited with: ${page.related.slice(0, 6).map((r) => `${r.code} ${r.title}`).join("; ")}` : "",
+  ];
+  return lines.filter((l, i) => l !== "" || (i > 0 && lines[i - 1] !== "")).join("\n").trim();
+}
+
+server.registerTool(
+  "lookup_framework",
+  {
+    description:
+      "Explain a security framework reference as it is written (e.g. 'CIS Control 7', 'NIST SP 800-53 SI-2', 'GDPR Article 32', 'MITRE ATT&CK T1566', 'ISO/IEC 27001:2022 A.8.8'): what it asks for, the official link, and from ThreatNoir's framework library the controls that help and the lessons that cite it. Also flags stale numbering (CIS v7, ISO 27001:2013).",
+    inputSchema: {
+      reference: z.string().min(2).max(300).describe("The framework reference as written"),
+    },
+  },
+  async ({ reference }) => {
+    try {
+      const apiKey = getThreatNoirApiKeyOrNull();
+      const r = await fetchThreatNoirApiJson<{
+        recognised: boolean;
+        info: { family: string; code: string; title: string; publisher: string; summary: string[]; url: string; note?: string } | null;
+        key: { family: string; item: string } | null;
+      }>({ apiPath: "/api/frameworks/resolve", apiKey, query: { ref: reference } });
+      if (!r.recognised || !r.info) {
+        return { content: [{ type: "text", text: `Not recognised as a framework reference: "${reference}".` }] };
+      }
+      if (r.key) {
+        try {
+          const page = await fetchThreatNoirApiJson<FrameworkItemPage>({ apiPath: `/api/frameworks/${r.key.family}/${r.key.item}`, apiKey });
+          return { content: [{ type: "text", text: formatFrameworkPage(page) }] };
+        } catch {
+          // No library page yet: fall back to the short explanation.
+        }
+      }
+      const i = r.info;
+      const text = [`${i.family} ${i.code}: ${i.title} (${i.publisher})`, "", ...i.summary, i.note ? `\nNote: ${i.note}` : "", `Official source: ${i.url}`].join("\n");
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { content: [{ type: "text", text: `Error looking up framework: ${msg}` }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
+  "search_frameworks",
+  {
+    description:
+      "Search ThreatNoir's framework library (CIS Controls, NIST 800-53, NIST CSF, ISO 27001, GDPR, NIS2, DORA, MITRE ATT&CK, OWASP, PCI DSS and more) by words or code. Returns matching items with how often ThreatNoir lessons cite them and their page links.",
+    inputSchema: {
+      query: z.string().min(2).max(100).describe("Words or a code, e.g. 'patch', 'logging', 'SI-2', 'phishing'"),
+      family: z.string().max(40).optional().describe("Limit to one family slug, e.g. cis, nist-800-53, nist-csf, iso-27001, gdpr, nis2, dora, mitre-attack, owasp, pci-dss"),
+      limit: z.number().int().min(1).max(50).optional().describe("Max results (default 15)"),
+    },
+  },
+  async ({ query, family, limit }) => {
+    try {
+      const apiKey = getThreatNoirApiKeyOrNull();
+      const r = await fetchThreatNoirApiJson<{ items: FrameworkLibraryItem[] }>({ apiPath: "/api/frameworks", apiKey });
+      const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const hits = r.items
+        .filter((i) => !family || i.family === family)
+        .filter((i) => words.every((w) => `${i.code} ${i.title} ${i.family}`.toLowerCase().includes(w)))
+        .slice(0, Math.min(limit ?? 15, 50));
+      const text = hits.length
+        ? hits.map((i) => `${i.family} ${i.code}: ${i.title} (cited ${i.citations}x) https://threatnoir.com/frameworks/${i.family}/${i.item}`).join("\n")
+        : `No framework library items match "${query}".`;
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { content: [{ type: "text", text: `Error searching frameworks: ${msg}` }], isError: true };
+    }
+  },
+);
+
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
